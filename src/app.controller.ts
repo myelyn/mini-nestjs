@@ -1,9 +1,10 @@
 import { Controller, Get } from '@nestjs/common'
 
-@Controller('')
+@Controller('home')
 export class AppController{
   @Get()
   index(): string {
+    console.log(this)
     return 'hello'
   }
   @Get('list')

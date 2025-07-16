@@ -1,7 +1,6 @@
-import { NestApplication } from "./nest-application";
-
+import { NestApplication } from '@nestjs/core'
 export class NestFactory {
-  static create(module) {
+  static async create(module: any): Promise<NestApplication> {
     const app = new NestApplication(module)
     return app
   }
