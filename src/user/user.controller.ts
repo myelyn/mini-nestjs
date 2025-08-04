@@ -2,20 +2,36 @@ import {
   Controller, 
   Get, Post, Redirect, HttpCode, Header,
   Request, Req, Query, Headers, Session, Ip, Param, Body,
-  Response, Res
+  Response, Res,
+  Inject
 } from "@nestjs/common";
 
 import { UrlDecorator } from '../url.decorator'
+import { UserService } from "./user.service";
+import { TestService } from "./test.service";
 
 @Controller('user')
 export class UserController {
-  @Get('info')
-  getUserInfo() {
-    return 'getuserinfo'
+  constructor(
+    private readonly userService: UserService,
+    private readonly testService: TestService,
+    @Inject('testServiceToken') private readonly testServiceValue: TestService
+  ) {}
+  @Get('getuser')
+  getUser() {
+    return this.userService?.getUser()
+  }
+  @Get('gettest')
+  handleTest() {
+    return this.testService?.getTestValue()
+  }
+  @Get('getinject')
+  handleTest2() {
+    return this.testServiceValue?.getInjectValue()
   }
   @Get('test/:id')
   handleRequest(@Request() request, @Req() req, @Query('id') query, @Headers() headers, @Session() session, @Ip() ip, @Param('id') param) {
-    console.log(param)
+    console.log(this.testService?.getTestValue())
     return 'handle request'
   }
   @Post('create')

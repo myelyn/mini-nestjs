@@ -2,13 +2,16 @@ import express, { Express, Request as ExpressRequest, Response as ExpressRespons
 import 'reflect-metadata'
 import path from 'path'
 import { Logger } from '@nestjs/core'
+import { DESIGN_PARAMETERS, INJECTED_TOKENS } from '@nestjs/common/constants';
 export class NestApplication {
   private readonly app:Express = express()
   private readonly module: any
+  private readonly providers = new Map()
   constructor(module: any) {
     this.module = module
     this.app.use(express.json())
     this.app.use(express.urlencoded({extended: true}))
+    this.initProviders()
   }
   use(middleware: (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => void) {
     this.app.use(middleware)
@@ -17,9 +20,11 @@ export class NestApplication {
     // 获取通过装饰器传入的控制器元数据
     const controllers = (Reflect.getMetadata('controllers', this.module)) || []
     for(const Controller of controllers) {
+      // 拿到构造函数参数类型
+      const dependencies = this.resolveDependencies(Controller)
       // 获取控制器类的元数据，拿到前缀
       const prefix = Reflect.getMetadata('prefix', Controller)
-      const controller = new Controller()
+      const controller = new Controller(...dependencies)
       const controllerPrototype = Reflect.getPrototypeOf(controller)
       // 通过控制器实例拿到控制器原型对象上的所有实例方法的名称
       for(const methodName of Object.getOwnPropertyNames(controllerPrototype)) {
@@ -59,9 +64,61 @@ export class NestApplication {
       }
     }
   }
+  private initProviders() {
+    const imports = (Reflect.getMetadata('imports', this.module)) ?? []
+    for(const importedModule of imports) {
+      this.registProvidersFromModule(importedModule)
+    }
+    const providers = (Reflect.getMetadata('providers', this.module)) || []
+    for(const provider of providers) {
+      this.addProvider(provider)
+    }
+  }
+  private registProvidersFromModule(module) {
+    const providers = (Reflect.getMetadata('providers', module)) || []
+    const exports = (Reflect.getMetadata('exports', module)) ?? []
+    for(const exportToken of exports) {
+      if (this.isModule(exportToken)) {
+        this.registProvidersFromModule(exportToken)
+      } else {
+        const provider = providers.find(provider => provider === exportToken || provider.provide === exportToken)
+        if (provider) this.addProvider(provider)
+      }
+    }
+  }
+  private isModule (token) {
+    return token && token instanceof Function && Reflect.getMetadata('isModule', token)
+  }
+  private addProvider(provider) {
+    if (provider.provide && provider.useClass) {
+      const dependencies = this.resolveDependencies(provider.useClass)
+      const classInstance = new provider.useClass(...dependencies)
+      this.providers.set(provider.provide, classInstance)
+    } else if (provider.provide && provider.useValue) {
+      this.providers.set(provider.provide, provider.useValue)
+    } else if (provider.provide && provider.useFactory) {
+      const inject = provider.inject??[]
+      const injectedValues = inject.map(this.getProviderByToken)
+      const value = provider.useFactory(...injectedValues)
+      this.providers.set(provider.provide, value)
+    }else {
+      const dependencies = this.resolveDependencies(provider)
+      this.providers.set(provider, new provider(...dependencies))
+    } 
+  }
+  private getProviderByToken (token) {
+    return this.providers.get(token) ?? token
+  }
   private getResponseMetadata (instance: any, methodName: string): any {
     const paramMetadata = Reflect.getMetadata('params', instance, methodName) ?? []
     return paramMetadata.find(param => ['Response', 'Res'].includes(param.key))
+  }
+  private resolveDependencies(target: any) {
+    const injectedTokens = Reflect.getMetadata(INJECTED_TOKENS, target) ?? []
+    const designParams = Reflect.getMetadata(DESIGN_PARAMETERS, target) ?? []
+    return designParams.map((param, index) => {
+      return this.getProviderByToken(injectedTokens[index] ?? param)
+    })
   }
   private resolveParams (instance: any, methodName: string, req: ExpressRequest, res: ExpressResponse, next: NextFunction) {
     const paramMetadata = Reflect.getMetadata('params', instance, methodName) ?? []
