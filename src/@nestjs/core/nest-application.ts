@@ -6,19 +6,31 @@ import { DESIGN_PARAMETERS, INJECTED_TOKENS } from '@nestjs/common/constants';
 export class NestApplication {
   private readonly app:Express = express()
   private readonly module: any
-  private readonly providers = new Map()
+  // 隔离模块的提供者
+  private readonly providerInstances = new Map()
+  private readonly globalProviderTokens = new Set()
+  private readonly moduleProviderTokens = new Map()
   constructor(module: any) {
     this.module = module
     this.app.use(express.json())
     this.app.use(express.urlencoded({extended: true}))
     this.initProviders()
+    this.initControllersRecursively(this.module)
   }
   use(middleware: (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => void) {
     this.app.use(middleware)
   }
-  init() {
-    // 获取通过装饰器传入的控制器元数据
-    const controllers = (Reflect.getMetadata('controllers', this.module)) || []
+
+  private initControllersRecursively(module) {
+    this.initControllers(module)
+    const imports = (Reflect.getMetadata('imports', module)) ?? []
+    for(const importedModule of imports) {
+      this.initControllersRecursively(importedModule)
+    }
+  }
+
+  private initControllers(moduleClass) {
+    const controllers = (Reflect.getMetadata('controllers', moduleClass)) || []
     for(const Controller of controllers) {
       // 拿到构造函数参数类型
       const dependencies = this.resolveDependencies(Controller)
@@ -64,50 +76,79 @@ export class NestApplication {
       }
     }
   }
-  private initProviders() {
-    const imports = (Reflect.getMetadata('imports', this.module)) ?? []
-    for(const importedModule of imports) {
-      this.registProvidersFromModule(importedModule)
-    }
-    const providers = (Reflect.getMetadata('providers', this.module)) || []
-    for(const provider of providers) {
-      this.addProvider(provider)
-    }
-  }
-  private registProvidersFromModule(module) {
-    const providers = (Reflect.getMetadata('providers', module)) || []
-    const exports = (Reflect.getMetadata('exports', module)) ?? []
-    for(const exportToken of exports) {
-      if (this.isModule(exportToken)) {
-        this.registProvidersFromModule(exportToken)
-      } else {
-        const provider = providers.find(provider => provider === exportToken || provider.provide === exportToken)
-        if (provider) this.addProvider(provider)
-      }
-    }
-  }
   private isModule (token) {
     return token && token instanceof Function && Reflect.getMetadata('isModule', token)
   }
-  private addProvider(provider) {
+  private initProviders() {
+    // 注册导入的模块的提供者
+    const imports = (Reflect.getMetadata('imports', this.module)) ?? []
+    for(const importedModule of imports) {
+      this.registModuleProviders(importedModule, this.module)
+    }
+    // 注册根模块的提供者
+    const providers = (Reflect.getMetadata('providers', this.module)) || []
+    for(const provider of providers) {
+      this.addProvider(provider, this.module)
+    }
+    console.log('moduleProviderTokens',this.moduleProviderTokens)
+    console.log('globalProviderTokens',this.globalProviderTokens)
+  }
+  private registModuleProviders(module, ...parentModules) {
+    const isGlobal = Reflect.getMetadata('isGlobal', module)
+    // 除了根模块，其他模块的提供者都来自exports
+    const providers = Reflect.getMetadata('providers', module) ?? []
+    const exports = (Reflect.getMetadata('exports', module)) ?? []
+    for(const exportToken of exports) {
+      if (this.isModule(exportToken)) {
+        // 如果导出的是模块，则递归注册该模块的提供者
+        this.registModuleProviders(exportToken, module, ...parentModules)
+      } else {
+        // 如果导出的是提供者，则注册该提供者
+        const provider = providers.find(provider => provider === exportToken || provider.provide === exportToken)
+        if (provider) {
+          // 注册提供者到模块和父模块
+          [module, ...parentModules].forEach(module => {
+            this.addProvider(provider, module, isGlobal)
+          })
+        }
+      }
+    }
+  }
+  private addProvider(provider, module, isGlobal = false) {
+    const providers = isGlobal ? this.globalProviderTokens : this.moduleProviderTokens.get(module) ?? new Set()
+    if (!this.moduleProviderTokens.has(module)) {
+      this.moduleProviderTokens.set(module, providers)
+    }
     if (provider.provide && provider.useClass) {
+      // 如果提供者是类（useClass），则创建实例
       const dependencies = this.resolveDependencies(provider.useClass)
       const classInstance = new provider.useClass(...dependencies)
-      this.providers.set(provider.provide, classInstance)
+      this.providerInstances.set(provider.provide, classInstance)
+      providers.add(provider.provide)
     } else if (provider.provide && provider.useValue) {
-      this.providers.set(provider.provide, provider.useValue)
+      // 如果提供者是值，则直接设置
+      this.providerInstances.set(provider.provide, provider.useValue)
+      providers.add(provider.provide)
     } else if (provider.provide && provider.useFactory) {
+      // 如果提供者是工厂函数，则调用工厂函数获取值
       const inject = provider.inject??[]
-      const injectedValues = inject.map(this.getProviderByToken)
+      const injectedValues = inject.map((injectedToken) => this.getProviderByToken(injectedToken, module))
       const value = provider.useFactory(...injectedValues)
-      this.providers.set(provider.provide, value)
+      this.providerInstances.set(provider.provide, value)
+      providers.add(provider.provide)
     }else {
+      // 如果提供者是类，则创建实例
       const dependencies = this.resolveDependencies(provider)
-      this.providers.set(provider, new provider(...dependencies))
+      this.providerInstances.set(provider, new provider(...dependencies))
+      providers.add(provider)
     } 
   }
-  private getProviderByToken (token) {
-    return this.providers.get(token) ?? token
+  private getProviderByToken (token, module) {
+    if (this.providerInstances.has(token)) {
+      return this.providerInstances.get(token)
+    } else if (this.moduleProviderTokens.get(module)?.has(token)) {
+      return this.providerInstances.get(token)
+    }
   }
   private getResponseMetadata (instance: any, methodName: string): any {
     const paramMetadata = Reflect.getMetadata('params', instance, methodName) ?? []
@@ -117,7 +158,9 @@ export class NestApplication {
     const injectedTokens = Reflect.getMetadata(INJECTED_TOKENS, target) ?? []
     const designParams = Reflect.getMetadata(DESIGN_PARAMETERS, target) ?? []
     return designParams.map((param, index) => {
-      return this.getProviderByToken(injectedTokens[index] ?? param)
+      const token = injectedTokens[index] ?? param
+      const module = Reflect.getMetadata('module', target)
+      return this.getProviderByToken(token, module)
     })
   }
   private resolveParams (instance: any, methodName: string, req: ExpressRequest, res: ExpressResponse, next: NextFunction) {
@@ -158,7 +201,6 @@ export class NestApplication {
     })
   }
   listen(port: number) {
-    this.init()
     this.app.listen(port, () => {
       Logger.log(`Application is running on: http://localhost:${port}`, 'NestApplication');
     })

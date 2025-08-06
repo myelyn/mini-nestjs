@@ -8,31 +8,18 @@ import {
 
 import { UrlDecorator } from '../url.decorator'
 import { UserService } from "./user.service";
-import { TestService } from "./test.service";
+import { LoggerService } from "../common/services/logger.service";
 
 @Controller('user')
 export class UserController {
   constructor(
     private readonly userService: UserService,
-    private readonly testService: TestService,
-    @Inject('testServiceToken') private readonly testServiceValue: TestService
+    private readonly loggerService: LoggerService
   ) {}
   @Get('getuser')
   getUser() {
+    this.loggerService.log('Getting user...')
     return this.userService?.getUser()
-  }
-  @Get('gettest')
-  handleTest() {
-    return this.testService?.getTestValue()
-  }
-  @Get('getinject')
-  handleTest2() {
-    return this.testServiceValue?.getInjectValue()
-  }
-  @Get('test/:id')
-  handleRequest(@Request() request, @Req() req, @Query('id') query, @Headers() headers, @Session() session, @Ip() ip, @Param('id') param) {
-    console.log(this.testService?.getTestValue())
-    return 'handle request'
   }
   @Post('create')
   createUser(@Body() createUserDto, @Body('username') username, @Response({passthrough: true}) response, @Res() res) {
